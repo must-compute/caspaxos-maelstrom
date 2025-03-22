@@ -36,7 +36,22 @@ impl CASPaxos {
 
     async fn handle(self: Arc<Self>, msg: Message) {
         match msg.body.inner.clone() {
-            Body::Init { node_id, node_ids } => todo!(),
+            Body::Init { .. } => {
+                // NOTE: By the time we receive this Init, its content was already used by
+                //       self.node to store the node ids provided by the msg.
+                //       So all we have to do here is to respond with InitOk.
+                let _ = self
+                    .node
+                    .clone()
+                    .send(
+                        &msg.src,
+                        Body::InitOk {
+                            in_reply_to: msg.body.msg_id,
+                        },
+                        None,
+                    )
+                    .await;
+            }
             Body::Read { key } => todo!(),
             Body::Write { key, value } => todo!(),
             Body::Cas { key, from, to } => todo!(),
