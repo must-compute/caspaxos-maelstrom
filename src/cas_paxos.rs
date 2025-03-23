@@ -9,9 +9,68 @@ use crate::{
     node::Node,
 };
 
+type BallotNumber = usize;
+type NodeId = String;
+type StateMachine = KeyValueStore<usize, usize>;
+type PromisesInbox = Vec<(NodeId, BallotNumber, StateMachine)>;
+
+#[derive(Clone, Debug)]
 enum Role {
-    Proposer { op: Message },
+    Proposer {
+        op: Message,
+        last_accept_broadcast: BallotNumber, // ballot_number of last broadcast of Accept msgs
+        promises_inbox: PromisesInbox,
+        pending_client_repsonse_body: Body,
+    },
     Acceptor,
+}
+
+impl Role {
+    fn add_promise_to_inbox(
+        &mut self,
+        node_id: &str,
+        ballot_number: BallotNumber,
+        state_machine: StateMachine,
+    ) {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref mut promises_inbox,
+                ..
+            } => {
+                promises_inbox.push((node_id.to_string(), ballot_number, state_machine));
+            }
+        }
+    }
+
+    fn promises_inbox(&self) -> PromisesInbox {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref promises_inbox, ..
+            } => promises_inbox.clone(),
+        }
+    }
+
+    fn set_last_accept_broadcast(&mut self, ballot_number: usize) {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref mut last_accept_broadcast,
+                ..
+            } => *last_accept_broadcast = ballot_number,
+        }
+    }
+
+    fn set_pending_client_response_body(&mut self, body: Body) {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref mut pending_client_repsonse_body,
+                ..
+            } => *pending_client_repsonse_body = body,
+        }
+    }
 }
 
 // NOTE Here, we store the entire key-value store in a single CASPaxos instance.
@@ -75,9 +134,10 @@ impl CASPaxos {
             Body::Cas { key, from, to } => todo!(),
             Body::Proxy { proxied_msg } => todo!(),
             Body::Propose { ballot_number } => {
-                self.clone()
-                    .reject_if_ballot_is_stale(ballot_number, &msg)
-                    .await;
+                if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+                    self.clone().send_reject_ballot_number(&msg).await;
+                    return;
+                }
 
                 let existing_ballot_number = self
                     .highest_known_ballot_number
@@ -94,10 +154,64 @@ impl CASPaxos {
                 ballot_number,
                 value,
             } => {
-                self.clone()
-                    .reject_if_ballot_is_stale(ballot_number, &msg)
-                    .await;
+                let mut ballot_number_was_rejected = false;
+                let mut should_broadcast_accept = false;
+                {
+                    let mut role_guard = self.role.lock().unwrap();
+                    match &*role_guard {
+                        Role::Acceptor { .. } => (),
+                        Role::Proposer {
+                            last_accept_broadcast,
+                            op,
+                            ..
+                        } => {
+                            if self.highest_known_ballot_number.load(Ordering::SeqCst)
+                                > ballot_number
+                            {
+                                ballot_number_was_rejected = true;
+                            } else {
+                                let last_accept_broadcast = *last_accept_broadcast;
+                                let op = op.clone();
+                                role_guard.add_promise_to_inbox(&msg.src, ballot_number, value);
+
+                                let majority_is_reached_for_the_first_time =
+                                    role_guard.promises_inbox().len() > self.majority_count()
+                                        && last_accept_broadcast < ballot_number;
+                                if majority_is_reached_for_the_first_time {
+                                    role_guard.set_last_accept_broadcast(ballot_number);
+                                    should_broadcast_accept = true;
+
+                                    let mut promises = role_guard.promises_inbox();
+                                    // desc. sort by ballot_number, then node id as a tie breaker.
+                                    promises
+                                        .sort_by(|b, a| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+                                    let (_, _, mut state) = promises.first().unwrap().clone();
+                                    let body =
+                                        self.clone().apply_to_state_machine(&op, &mut state);
+
+                                    *self.state_machine.lock().unwrap() = state;
+                                    role_guard.set_pending_client_response_body(body);
+                                }
+                            }
+                        }
+                    };
+                }
+
+                if ballot_number_was_rejected {
+                    self.send_reject_ballot_number(&msg).await;
+                    return;
+                }
+
+                if should_broadcast_accept {
+                    let body = Body::Accept {
+                        ballot_number,
+                        value: self.state_machine.lock().unwrap().clone(),
+                    };
+                    self.node.clone().broadcast(body, None).await;
+                }
             }
+            Body::Accept { .. } => todo!(),
             Body::Error {
                 in_reply_to,
                 code,
@@ -114,7 +228,7 @@ impl CASPaxos {
         let mut role_guard = self.role.lock().unwrap();
 
         // switch to Proposer state, no matter what
-        *role_guard = Role::Proposer { op };
+        // *role_guard = Role::Proposer { op };
 
         // stop tracking incoming accepts of prior proposals if any?
         // broadcast propose
@@ -133,20 +247,70 @@ impl CASPaxos {
 
     // TODO we should track the source of the highest known ballot number, since we might need to use
     //      node ids for tie breakers in case the incoming ballot number matches the number we've seen before.
-    async fn reject_if_ballot_is_stale(self: Arc<Self>, ballot_number: usize, msg: &Message) {
-        let highest_known_ballot_number = self.highest_known_ballot_number.load(Ordering::SeqCst);
+    async fn send_reject_ballot_number(self: Arc<Self>, msg: &Message) {
+        let body = Body::Error {
+            in_reply_to: msg.body.msg_id,
+            code: ErrorCode::PreconditionFailed,
+            text: String::from("exepcted a greater ballot number"),
+        };
 
-        if ballot_number < highest_known_ballot_number {
-            let text =
-                format!("expected a ballot number greater than {highest_known_ballot_number}");
-            let body = Body::Error {
-                in_reply_to: msg.body.msg_id,
-                code: ErrorCode::PreconditionFailed,
-                text,
-            };
+        self.node.clone().send(&msg.src, body, None).await;
+    }
 
-            self.node.clone().send(&msg.src, body, None).await;
-            return;
+    fn majority_count(&self) -> usize {
+        let all_nodes_count = self.node.other_node_ids.get().unwrap().len() + 1;
+        (all_nodes_count / 2) + 1
+    }
+
+    fn apply_to_state_machine(
+        self: Arc<Self>,
+        msg: &Message,
+        state_machine: &mut KeyValueStore<usize, usize>,
+    ) -> Body {
+        match msg.body.inner {
+            Body::Read { key } => {
+                let result = state_machine.read(&key);
+
+                match result {
+                    Some(value) => Body::ReadOk {
+                        in_reply_to: msg.body.msg_id,
+                        value: *value,
+                    },
+                    None => {
+                        let err = ErrorCode::KeyDoesNotExist;
+                        Body::Error {
+                            in_reply_to: msg.body.msg_id,
+                            code: err.clone(),
+                            text: err.to_string(),
+                        }
+                    }
+                }
+            }
+            Body::Write { key, value } => {
+                state_machine.write(key, value);
+                Body::WriteOk {
+                    in_reply_to: msg.body.msg_id,
+                }
+            }
+            Body::Cas { key, from, to } => {
+                let result = state_machine.cas(key, from, to);
+
+                match result {
+                    Ok(()) => Body::CasOk {
+                        in_reply_to: msg.body.msg_id,
+                    },
+                    Err(e) => match e.downcast_ref::<ErrorCode>() {
+                        Some(e @ ErrorCode::PreconditionFailed)
+                        | Some(e @ ErrorCode::KeyDoesNotExist) => Body::Error {
+                            in_reply_to: msg.body.msg_id,
+                            code: e.clone(),
+                            text: e.to_string(),
+                        },
+                        _ => panic!("encountered an unexpected error while processing Cas request"),
+                    },
+                }
+            }
+            _ => unreachable!(),
         }
     }
 }

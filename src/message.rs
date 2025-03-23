@@ -60,6 +60,10 @@ pub enum Body {
         ballot_number: usize,
         value: KeyValueStore<usize, usize>,
     },
+    Accept {
+        ballot_number: usize,
+        value: KeyValueStore<usize, usize>,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -81,7 +85,8 @@ impl Body {
             | Body::Cas { .. }
             | Body::Proxy { .. }
             | Body::Propose { .. }
-            | Body::Promise { .. } => None,
+            | Body::Promise { .. }
+            | Body::Accept { .. } => None,
         }
     }
     pub fn set_in_reply_to(&mut self, new_in_reply_to: usize) {
@@ -114,7 +119,8 @@ impl Body {
             | Body::Cas { .. }
             | Body::Proxy { .. }
             | Body::Propose { .. }
-            | Body::Promise { .. } => {
+            | Body::Promise { .. }
+            | Body::Accept { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
         }
