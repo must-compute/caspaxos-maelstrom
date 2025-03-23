@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use crate::{
     kv_store::KeyValueStore,
@@ -6,9 +9,22 @@ use crate::{
     node::Node,
 };
 
+enum Role {
+    Proposer { op: Message },
+    Acceptor,
+}
+
+// NOTE Here, we store the entire key-value store in a single CASPaxos instance.
+//      A non-toy implementatation would instead store the kv store as a set of
+//      independent, labelled CASPaxos instances (where each instance label
+//      corresponds to a key in the kv store. See section '2.3.3 Optimization'
+//      in the CASPaxos paper.
+// TODO Implement the optimization above.
 struct CASPaxos {
     node: Arc<Node>,
     state_machine: Mutex<KeyValueStore<usize, usize>>,
+    role: Mutex<Role>,
+    highest_known_ballot_number: AtomicUsize,
 }
 
 impl CASPaxos {
@@ -16,6 +32,8 @@ impl CASPaxos {
         Self {
             node: Arc::new(Node::new()),
             state_machine: Mutex::new(KeyValueStore::default()),
+            role: Mutex::new(Role::Acceptor),
+            highest_known_ballot_number: AtomicUsize::new(0),
         }
     }
 
