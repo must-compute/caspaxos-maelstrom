@@ -20,7 +20,7 @@ enum Role {
         op: Message,
         last_accept_broadcast: BallotNumber, // ballot_number of last broadcast of Accept msgs
         promises_inbox: PromisesInbox,
-        pending_client_repsonse_body: Body,
+        pending_client_repsonse_body: Option<Body>,
     },
     Acceptor,
 }
@@ -68,7 +68,7 @@ impl Role {
             Role::Proposer {
                 ref mut pending_client_repsonse_body,
                 ..
-            } => *pending_client_repsonse_body = body,
+            } => *pending_client_repsonse_body = Some(body),
         }
     }
 }
@@ -79,7 +79,7 @@ impl Role {
 //      corresponds to a key in the kv store. See section '2.3.3 Optimization'
 //      in the CASPaxos paper.
 // TODO Implement the optimization above.
-struct CASPaxos {
+pub struct CASPaxos {
     node: Arc<Node>,
     state_machine: Mutex<KeyValueStore<usize, usize>>,
     role: Mutex<Role>,
@@ -129,9 +129,9 @@ impl CASPaxos {
                     )
                     .await;
             }
-            Body::Read { key } => todo!(),
-            Body::Write { key, value } => todo!(),
-            Body::Cas { key, from, to } => todo!(),
+            Body::Read { .. } | Body::Write { .. } | Body::Cas { .. } => {
+                self.clone().propose(msg).await;
+            }
             Body::Proxy { proxied_msg } => todo!(),
             Body::Propose { ballot_number } => {
                 if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
@@ -187,8 +187,7 @@ impl CASPaxos {
                                         .sort_by(|b, a| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
                                     let (_, _, mut state) = promises.first().unwrap().clone();
-                                    let body =
-                                        self.clone().apply_to_state_machine(&op, &mut state);
+                                    let body = self.clone().apply_to_state_machine(&op, &mut state);
 
                                     *self.state_machine.lock().unwrap() = state;
                                     role_guard.set_pending_client_response_body(body);
@@ -216,7 +215,7 @@ impl CASPaxos {
                 in_reply_to,
                 code,
                 text,
-            } => todo!(),
+            } => eprintln!("GOT AN ERROR - TODO"),
             Body::InitOk { .. }
             | Body::ReadOk { .. }
             | Body::WriteOk { .. }
@@ -225,14 +224,30 @@ impl CASPaxos {
     }
 
     async fn propose(self: Arc<Self>, op: Message) {
-        let mut role_guard = self.role.lock().unwrap();
+        {
+            let mut role_guard = self.role.lock().unwrap();
+            let last_accept_broadcast = match *role_guard {
+                Role::Proposer {
+                    last_accept_broadcast,
+                    ..
+                } => last_accept_broadcast,
+                Role::Acceptor => 0,
+            };
 
-        // switch to Proposer state, no matter what
-        // *role_guard = Role::Proposer { op };
+            *role_guard = Role::Proposer {
+                op,
+                last_accept_broadcast,
+                promises_inbox: Vec::new(),
+                pending_client_repsonse_body: None,
+            };
+        }
 
-        // stop tracking incoming accepts of prior proposals if any?
-        // broadcast propose
-        todo!()
+        self.highest_known_ballot_number
+            .fetch_add(1, Ordering::SeqCst);
+        let ballot_number = self.highest_known_ballot_number.load(Ordering::SeqCst);
+        let body = Body::Propose { ballot_number };
+
+        self.node.clone().broadcast(body, None).await;
     }
 
     async fn promise(self: Arc<Self>) {

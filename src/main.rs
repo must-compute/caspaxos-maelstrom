@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use cas_paxos::CASPaxos;
+
 mod cas_paxos;
 mod kv_store;
 mod message;
@@ -16,5 +20,6 @@ async fn main() {
         .with_max_level(tracing::Level::DEBUG)
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
-    todo!()
+
+    Arc::new(CASPaxos::new()).run().await;
 }
