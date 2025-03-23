@@ -1,8 +1,10 @@
 use std::{collections::HashMap, hash::Hash};
 
+use serde::{Deserialize, Serialize};
+
 use super::message::ErrorCode;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct KeyValueStore<K, V>
 where
     K: Hash + Eq + Send,
@@ -16,6 +18,10 @@ where
     K: Hash + Eq + Send,
     V: PartialEq + Send,
 {
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn read(&self, key: &K) -> Option<&V> {
         self.map.get(key)
     }

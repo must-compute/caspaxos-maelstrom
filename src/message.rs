@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
+use crate::kv_store::KeyValueStore;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Message {
     pub src: String,
@@ -51,6 +53,13 @@ pub enum Body {
     Proxy {
         proxied_msg: Box<Message>,
     },
+    Propose {
+        ballot_number: usize,
+    },
+    Promise {
+        ballot_number: usize,
+        value: KeyValueStore<usize, usize>,
+    },
     Error {
         in_reply_to: usize,
         code: ErrorCode,
@@ -70,7 +79,9 @@ impl Body {
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
-            | Body::Proxy { .. } => None,
+            | Body::Proxy { .. }
+            | Body::Propose { .. }
+            | Body::Promise { .. } => None,
         }
     }
     pub fn set_in_reply_to(&mut self, new_in_reply_to: usize) {
@@ -101,7 +112,9 @@ impl Body {
             | Body::Read { .. }
             | Body::Write { .. }
             | Body::Cas { .. }
-            | Body::Proxy { .. } => {
+            | Body::Proxy { .. }
+            | Body::Propose { .. }
+            | Body::Promise { .. } => {
                 panic!("trying to set in_reply_to on a body that doesnt have such field")
             }
         }

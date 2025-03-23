@@ -5,7 +5,7 @@ use std::sync::{
 
 use crate::{
     kv_store::KeyValueStore,
-    message::{Body, Message},
+    message::{Body, ErrorCode, Message},
     node::Node,
 };
 
@@ -74,6 +74,36 @@ impl CASPaxos {
             Body::Write { key, value } => todo!(),
             Body::Cas { key, from, to } => todo!(),
             Body::Proxy { proxied_msg } => todo!(),
+            Body::Propose { ballot_number } => {
+                let highest_known_ballot_number =
+                    self.highest_known_ballot_number.load(Ordering::SeqCst);
+
+                if ballot_number < self.highest_known_ballot_number.load(Ordering::SeqCst) {
+                    let text = format!(
+                        "expected a ballot number greater than {highest_known_ballot_number}"
+                    );
+                    let body = Body::Error {
+                        in_reply_to: msg.body.msg_id,
+                        code: ErrorCode::PreconditionFailed,
+                        text,
+                    };
+
+                    self.node.clone().send(&msg.src, body, None).await;
+                    return;
+                }
+
+                let existing_ballot_number = self
+                    .highest_known_ballot_number
+                    .swap(ballot_number, Ordering::SeqCst);
+
+                let body = Body::Promise {
+                    ballot_number: existing_ballot_number,
+                    value: self.state_machine.lock().unwrap().clone(),
+                };
+
+                self.node.clone().send(&msg.src, body, None).await;
+            }
+            Body::Promise { .. } => todo!(),
             Body::Error {
                 in_reply_to,
                 code,
@@ -84,5 +114,26 @@ impl CASPaxos {
             | Body::WriteOk { .. }
             | Body::CasOk { .. } => panic!("i shouldn't receive this ack msg"),
         }
+    }
+
+    async fn propose(self: Arc<Self>, op: Message) {
+        let mut role_guard = self.role.lock().unwrap();
+
+        // switch to Proposer state, no matter what
+        *role_guard = Role::Proposer { op };
+
+        // stop tracking incoming accepts of prior proposals if any?
+        // broadcast propose
+        todo!()
+    }
+
+    async fn promise(self: Arc<Self>) {
+        // switch to acceptor, no matter what
+        todo!()
+    }
+
+    async fn accept(self: Arc<Self>) {
+        // assert that i am currently an acceptor
+        todo!()
     }
 }
