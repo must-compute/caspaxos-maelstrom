@@ -64,7 +64,7 @@ impl CASPaxos {
             Body::InitOk { .. }
             | Body::ReadOk { .. }
             | Body::WriteOk { .. }
-            | Body::CasOk { .. } => todo!(),
+            | Body::CasOk { .. } => panic!("i shouldn't receive this ack msg"),
         }
     }
 }
