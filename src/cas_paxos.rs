@@ -75,22 +75,9 @@ impl CASPaxos {
             Body::Cas { key, from, to } => todo!(),
             Body::Proxy { proxied_msg } => todo!(),
             Body::Propose { ballot_number } => {
-                let highest_known_ballot_number =
-                    self.highest_known_ballot_number.load(Ordering::SeqCst);
-
-                if ballot_number < self.highest_known_ballot_number.load(Ordering::SeqCst) {
-                    let text = format!(
-                        "expected a ballot number greater than {highest_known_ballot_number}"
-                    );
-                    let body = Body::Error {
-                        in_reply_to: msg.body.msg_id,
-                        code: ErrorCode::PreconditionFailed,
-                        text,
-                    };
-
-                    self.node.clone().send(&msg.src, body, None).await;
-                    return;
-                }
+                self.clone()
+                    .reject_if_ballot_is_stale(ballot_number, &msg)
+                    .await;
 
                 let existing_ballot_number = self
                     .highest_known_ballot_number
@@ -103,7 +90,14 @@ impl CASPaxos {
 
                 self.node.clone().send(&msg.src, body, None).await;
             }
-            Body::Promise { .. } => todo!(),
+            Body::Promise {
+                ballot_number,
+                value,
+            } => {
+                self.clone()
+                    .reject_if_ballot_is_stale(ballot_number, &msg)
+                    .await;
+            }
             Body::Error {
                 in_reply_to,
                 code,
@@ -135,5 +129,24 @@ impl CASPaxos {
     async fn accept(self: Arc<Self>) {
         // assert that i am currently an acceptor
         todo!()
+    }
+
+    // TODO we should track the source of the highest known ballot number, since we might need to use
+    //      node ids for tie breakers in case the incoming ballot number matches the number we've seen before.
+    async fn reject_if_ballot_is_stale(self: Arc<Self>, ballot_number: usize, msg: &Message) {
+        let highest_known_ballot_number = self.highest_known_ballot_number.load(Ordering::SeqCst);
+
+        if ballot_number < highest_known_ballot_number {
+            let text =
+                format!("expected a ballot number greater than {highest_known_ballot_number}");
+            let body = Body::Error {
+                in_reply_to: msg.body.msg_id,
+                code: ErrorCode::PreconditionFailed,
+                text,
+            };
+
+            self.node.clone().send(&msg.src, body, None).await;
+            return;
+        }
     }
 }
