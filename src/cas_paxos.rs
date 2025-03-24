@@ -139,22 +139,7 @@ impl CASPaxos {
             }
             Body::Proxy { proxied_msg } => todo!(),
             Body::Propose { ballot_number } => {
-                if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
-                    self.clone()
-                        .send_reject_ballot_number(&msg.src, msg.body.msg_id)
-                        .await;
-                    return;
-                }
-
-                self.highest_known_ballot_number
-                    .store(ballot_number, Ordering::SeqCst);
-
-                let body = Body::Promise {
-                    ballot_number,
-                    value: self.state_machine.lock().unwrap().clone(),
-                };
-
-                self.node.clone().send(&msg.src, body, None).await;
+                self.promise(&msg.src, msg.body.msg_id, ballot_number).await;
             }
             Body::Promise {
                 ballot_number,
@@ -181,6 +166,25 @@ impl CASPaxos {
             | Body::WriteOk { .. }
             | Body::CasOk { .. } => panic!("i shouldn't receive this ack msg"),
         }
+    }
+
+    async fn promise(self: Arc<Self>, src: &str, src_msg_id: usize, ballot_number: usize) {
+        if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+            self.clone()
+                .send_reject_ballot_number(src, src_msg_id)
+                .await;
+            return;
+        }
+
+        self.highest_known_ballot_number
+            .store(ballot_number, Ordering::SeqCst);
+
+        let body = Body::Promise {
+            ballot_number,
+            value: self.state_machine.lock().unwrap().clone(),
+        };
+
+        self.node.clone().send(src, body, None).await;
     }
 
     async fn handle_promise_msg(
@@ -298,11 +302,6 @@ impl CASPaxos {
         let body = Body::Propose { ballot_number };
 
         self.node.clone().broadcast(body, None).await;
-    }
-
-    async fn promise(self: Arc<Self>) {
-        // switch to acceptor, no matter what
-        todo!()
     }
 
     // TODO we should track the source of the highest known ballot number, since we might need to use
