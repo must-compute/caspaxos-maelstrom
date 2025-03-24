@@ -23,6 +23,7 @@ enum Role {
     Proposer {
         op: Message,
         last_accept_broadcast: BallotNumber, // ballot_number of last broadcast of Accept msgs
+        last_client_confirmation: BallotNumber, // ballot_number at last msg we confirmed to client
         promises_inbox: PromisesInbox,
         acceptance_inbox: AcceptanceInbox,
         pending_client_repsonse_body: Option<Body>,
@@ -57,6 +58,28 @@ impl Role {
         }
     }
 
+    fn add_acceptance_to_inbox(&mut self, node_id: &str, ballot_number: BallotNumber) {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref mut acceptance_inbox,
+                ..
+            } => {
+                acceptance_inbox.insert((node_id.to_string(), ballot_number));
+            }
+        }
+    }
+
+    fn acceptance_inbox(&self) -> AcceptanceInbox {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref acceptance_inbox,
+                ..
+            } => acceptance_inbox.clone(),
+        }
+    }
+
     fn set_last_accept_broadcast(&mut self, ballot_number: usize) {
         match self {
             Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
@@ -64,6 +87,16 @@ impl Role {
                 ref mut last_accept_broadcast,
                 ..
             } => *last_accept_broadcast = ballot_number,
+        }
+    }
+
+    fn set_last_client_confirmation(&mut self, ballot_number: usize) {
+        match self {
+            Role::Acceptor => panic!("got called on an Acceptor instead of a Proposer"),
+            Role::Proposer {
+                ref mut last_client_confirmation,
+                ..
+            } => *last_client_confirmation = ballot_number,
         }
     }
 
@@ -155,7 +188,10 @@ impl CASPaxos {
                 self.accept(&msg.src, msg.body.msg_id, ballot_number, value)
                     .await;
             }
-            Body::Accepted { ballot_number } => {}
+            Body::Accepted { ballot_number } => {
+                self.handle_accepted_msg(&msg.src, msg.body.msg_id, ballot_number)
+                    .await;
+            }
             Body::Error {
                 in_reply_to,
                 code,
@@ -165,6 +201,59 @@ impl CASPaxos {
             | Body::ReadOk { .. }
             | Body::WriteOk { .. }
             | Body::CasOk { .. } => panic!("i shouldn't receive this ack msg"),
+        }
+    }
+
+    async fn handle_accepted_msg(
+        self: Arc<Self>,
+        src: &str,
+        src_msg_id: usize,
+        ballot_number: usize,
+    ) {
+        let mut ballot_number_was_rejected = false;
+        let mut should_reply_to_client = false;
+        let mut client = String::new();
+        let mut body: Option<Body> = None;
+        {
+            let mut role_guard = self.role.lock().unwrap();
+            match &*role_guard {
+                Role::Acceptor => (),
+                Role::Proposer {
+                    op,
+                    last_client_confirmation,
+                    pending_client_repsonse_body,
+                    ..
+                } => {
+                    // we only want to confirm msgs accepted during the current CASPaxos round.
+                    if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+                        ballot_number_was_rejected = true;
+                    } else {
+                        let last_client_confirmation = *last_client_confirmation;
+                        let pending_body = pending_client_repsonse_body.clone();
+                        client = op.src.clone();
+                        role_guard.add_acceptance_to_inbox(src, ballot_number);
+
+                        let majority_is_reached_for_the_first_time =
+                            role_guard.acceptance_inbox().len() >= self.majority_count()
+                                && last_client_confirmation < ballot_number;
+                        if majority_is_reached_for_the_first_time {
+                            role_guard.set_last_client_confirmation(ballot_number);
+                            should_reply_to_client = true;
+
+                            body = pending_body;
+                        }
+                    }
+                }
+            };
+        } // role_guard dropped
+
+        if ballot_number_was_rejected {
+            self.send_reject_ballot_number(src, src_msg_id).await;
+            return;
+        }
+
+        if should_reply_to_client {
+            self.node.clone().send(&client, body.unwrap(), None).await;
         }
     }
 
@@ -279,12 +368,13 @@ impl CASPaxos {
     async fn propose(self: Arc<Self>, op: Message) {
         {
             let mut role_guard = self.role.lock().unwrap();
-            let last_accept_broadcast = match *role_guard {
+            let (last_accept_broadcast, last_client_confirmation) = match *role_guard {
                 Role::Proposer {
                     last_accept_broadcast,
+                    last_client_confirmation,
                     ..
-                } => last_accept_broadcast,
-                Role::Acceptor => 0,
+                } => (last_accept_broadcast, last_client_confirmation),
+                Role::Acceptor => (0, 0),
             };
 
             *role_guard = Role::Proposer {
@@ -293,6 +383,7 @@ impl CASPaxos {
                 promises_inbox: Vec::new(),
                 pending_client_repsonse_body: None,
                 acceptance_inbox: HashSet::new(),
+                last_client_confirmation,
             };
         }
 
