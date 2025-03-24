@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use crate::{
@@ -13,6 +16,7 @@ type BallotNumber = usize;
 type NodeId = String;
 type StateMachine = KeyValueStore<usize, usize>;
 type PromisesInbox = Vec<(NodeId, BallotNumber, StateMachine)>;
+type AcceptanceInbox = HashSet<(NodeId, BallotNumber)>;
 
 #[derive(Clone, Debug)]
 enum Role {
@@ -20,6 +24,7 @@ enum Role {
         op: Message,
         last_accept_broadcast: BallotNumber, // ballot_number of last broadcast of Accept msgs
         promises_inbox: PromisesInbox,
+        acceptance_inbox: AcceptanceInbox,
         pending_client_repsonse_body: Option<Body>,
     },
     Acceptor,
@@ -158,7 +163,7 @@ impl CASPaxos {
                 {
                     let mut role_guard = self.role.lock().unwrap();
                     match &*role_guard {
-                        Role::Acceptor { .. } => (),
+                        Role::Acceptor => (),
                         Role::Proposer {
                             last_accept_broadcast,
                             op,
@@ -209,7 +214,29 @@ impl CASPaxos {
                     self.node.clone().broadcast(body, None).await;
                 }
             }
-            Body::Accept { .. } => todo!(),
+            Body::Accept {
+                ballot_number,
+                value,
+            } => {
+                let role = self.role.lock().unwrap().clone();
+                match role {
+                    Role::Proposer { .. } => (),
+                    Role::Acceptor => {
+                        if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+                            self.clone().send_reject_ballot_number(&msg).await;
+                            return;
+                        }
+
+                        *self.state_machine.lock().unwrap() = value;
+
+                        self.node
+                            .clone()
+                            .send(&msg.src, Body::Accepted { ballot_number }, None)
+                            .await;
+                    }
+                }
+            }
+            Body::Accepted { ballot_number } => {}
             Body::Error {
                 in_reply_to,
                 code,
@@ -238,6 +265,7 @@ impl CASPaxos {
                 last_accept_broadcast,
                 promises_inbox: Vec::new(),
                 pending_client_repsonse_body: None,
+                acceptance_inbox: HashSet::new(),
             };
         }
 
