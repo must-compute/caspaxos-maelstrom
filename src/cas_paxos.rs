@@ -140,7 +140,9 @@ impl CASPaxos {
             Body::Proxy { proxied_msg } => todo!(),
             Body::Propose { ballot_number } => {
                 if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
-                    self.clone().send_reject_ballot_number(&msg).await;
+                    self.clone()
+                        .send_reject_ballot_number(&msg.src, msg.body.msg_id)
+                        .await;
                     return;
                 }
 
@@ -202,7 +204,8 @@ impl CASPaxos {
                 } // role_guard dropped
 
                 if ballot_number_was_rejected {
-                    self.send_reject_ballot_number(&msg).await;
+                    self.send_reject_ballot_number(&msg.src, msg.body.msg_id)
+                        .await;
                     return;
                 }
 
@@ -218,23 +221,8 @@ impl CASPaxos {
                 ballot_number,
                 value,
             } => {
-                let role = self.role.lock().unwrap().clone();
-                match role {
-                    Role::Proposer { .. } => (),
-                    Role::Acceptor => {
-                        if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
-                            self.clone().send_reject_ballot_number(&msg).await;
-                            return;
-                        }
-
-                        *self.state_machine.lock().unwrap() = value;
-
-                        self.node
-                            .clone()
-                            .send(&msg.src, Body::Accepted { ballot_number }, None)
-                            .await;
-                    }
-                }
+                self.accept(&msg.src, msg.body.msg_id, ballot_number, value)
+                    .await;
             }
             Body::Accepted { ballot_number } => {}
             Body::Error {
@@ -246,6 +234,34 @@ impl CASPaxos {
             | Body::ReadOk { .. }
             | Body::WriteOk { .. }
             | Body::CasOk { .. } => panic!("i shouldn't receive this ack msg"),
+        }
+    }
+
+    async fn accept(
+        self: Arc<Self>,
+        src: &str,
+        src_msg_id: usize,
+        ballot_number: usize,
+        value: KeyValueStore<usize, usize>,
+    ) {
+        let role = self.role.lock().unwrap().clone();
+        match role {
+            Role::Proposer { .. } => (),
+            Role::Acceptor => {
+                if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+                    self.clone()
+                        .send_reject_ballot_number(src, src_msg_id)
+                        .await;
+                    return;
+                }
+
+                *self.state_machine.lock().unwrap() = value;
+
+                self.node
+                    .clone()
+                    .send(src, Body::Accepted { ballot_number }, None)
+                    .await;
+            }
         }
     }
 
@@ -282,21 +298,16 @@ impl CASPaxos {
         todo!()
     }
 
-    async fn accept(self: Arc<Self>) {
-        // assert that i am currently an acceptor
-        todo!()
-    }
-
     // TODO we should track the source of the highest known ballot number, since we might need to use
     //      node ids for tie breakers in case the incoming ballot number matches the number we've seen before.
-    async fn send_reject_ballot_number(self: Arc<Self>, msg: &Message) {
+    async fn send_reject_ballot_number(self: Arc<Self>, dest: &str, in_reply_to: usize) {
         let body = Body::Error {
-            in_reply_to: msg.body.msg_id,
+            in_reply_to,
             code: ErrorCode::PreconditionFailed,
             text: String::from("exepcted a greater ballot number"),
         };
 
-        self.node.clone().send(&msg.src, body, None).await;
+        self.node.clone().send(dest, body, None).await;
     }
 
     fn majority_count(&self) -> usize {
