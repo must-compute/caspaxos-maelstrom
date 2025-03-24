@@ -139,12 +139,11 @@ impl CASPaxos {
                     return;
                 }
 
-                let existing_ballot_number = self
-                    .highest_known_ballot_number
-                    .swap(ballot_number, Ordering::SeqCst);
+                self.highest_known_ballot_number
+                    .store(ballot_number, Ordering::SeqCst);
 
                 let body = Body::Promise {
-                    ballot_number: existing_ballot_number,
+                    ballot_number,
                     value: self.state_machine.lock().unwrap().clone(),
                 };
 
@@ -175,7 +174,7 @@ impl CASPaxos {
                                 role_guard.add_promise_to_inbox(&msg.src, ballot_number, value);
 
                                 let majority_is_reached_for_the_first_time =
-                                    role_guard.promises_inbox().len() > self.majority_count()
+                                    role_guard.promises_inbox().len() >= self.majority_count()
                                         && last_accept_broadcast < ballot_number;
                                 if majority_is_reached_for_the_first_time {
                                     role_guard.set_last_accept_broadcast(ballot_number);
@@ -195,7 +194,7 @@ impl CASPaxos {
                             }
                         }
                     };
-                }
+                } // role_guard dropped
 
                 if ballot_number_was_rejected {
                     self.send_reject_ballot_number(&msg).await;
