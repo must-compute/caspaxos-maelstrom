@@ -160,62 +160,8 @@ impl CASPaxos {
                 ballot_number,
                 value,
             } => {
-                let mut ballot_number_was_rejected = false;
-                let mut should_broadcast_accept = false;
-                {
-                    let mut role_guard = self.role.lock().unwrap();
-                    match &*role_guard {
-                        Role::Acceptor => (),
-                        Role::Proposer {
-                            last_accept_broadcast,
-                            op,
-                            ..
-                        } => {
-                            if self.highest_known_ballot_number.load(Ordering::SeqCst)
-                                > ballot_number
-                            {
-                                ballot_number_was_rejected = true;
-                            } else {
-                                let last_accept_broadcast = *last_accept_broadcast;
-                                let op = op.clone();
-                                role_guard.add_promise_to_inbox(&msg.src, ballot_number, value);
-
-                                let majority_is_reached_for_the_first_time =
-                                    role_guard.promises_inbox().len() >= self.majority_count()
-                                        && last_accept_broadcast < ballot_number;
-                                if majority_is_reached_for_the_first_time {
-                                    role_guard.set_last_accept_broadcast(ballot_number);
-                                    should_broadcast_accept = true;
-
-                                    let mut promises = role_guard.promises_inbox();
-                                    // desc. sort by ballot_number, then node id as a tie breaker.
-                                    promises
-                                        .sort_by(|b, a| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-
-                                    let (_, _, mut state) = promises.first().unwrap().clone();
-                                    let body = self.clone().apply_to_state_machine(&op, &mut state);
-
-                                    *self.state_machine.lock().unwrap() = state;
-                                    role_guard.set_pending_client_response_body(body);
-                                }
-                            }
-                        }
-                    };
-                } // role_guard dropped
-
-                if ballot_number_was_rejected {
-                    self.send_reject_ballot_number(&msg.src, msg.body.msg_id)
-                        .await;
-                    return;
-                }
-
-                if should_broadcast_accept {
-                    let body = Body::Accept {
-                        ballot_number,
-                        value: self.state_machine.lock().unwrap().clone(),
-                    };
-                    self.node.clone().broadcast(body, None).await;
-                }
+                self.handle_promise_msg(&msg.src, msg.body.msg_id, ballot_number, value)
+                    .await;
             }
             Body::Accept {
                 ballot_number,
@@ -234,6 +180,67 @@ impl CASPaxos {
             | Body::ReadOk { .. }
             | Body::WriteOk { .. }
             | Body::CasOk { .. } => panic!("i shouldn't receive this ack msg"),
+        }
+    }
+
+    async fn handle_promise_msg(
+        self: Arc<Self>,
+        src: &str,
+        src_msg_id: usize,
+        ballot_number: usize,
+        value: KeyValueStore<usize, usize>,
+    ) {
+        let mut ballot_number_was_rejected = false;
+        let mut should_broadcast_accept = false;
+        {
+            let mut role_guard = self.role.lock().unwrap();
+            match &*role_guard {
+                Role::Acceptor => (),
+                Role::Proposer {
+                    last_accept_broadcast,
+                    op,
+                    ..
+                } => {
+                    if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+                        ballot_number_was_rejected = true;
+                    } else {
+                        let last_accept_broadcast = *last_accept_broadcast;
+                        let op = op.clone();
+                        role_guard.add_promise_to_inbox(src, ballot_number, value);
+
+                        let majority_is_reached_for_the_first_time =
+                            role_guard.promises_inbox().len() >= self.majority_count()
+                                && last_accept_broadcast < ballot_number;
+                        if majority_is_reached_for_the_first_time {
+                            role_guard.set_last_accept_broadcast(ballot_number);
+                            should_broadcast_accept = true;
+
+                            let mut promises = role_guard.promises_inbox();
+                            // desc. sort by ballot_number, then node id as a tie breaker.
+                            promises.sort_by(|b, a| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+                            let (_, _, mut state) = promises.first().unwrap().clone();
+                            let body = self.clone().apply_to_state_machine(&op, &mut state);
+
+                            *self.state_machine.lock().unwrap() = state;
+                            role_guard.set_pending_client_response_body(body);
+                        }
+                    }
+                }
+            };
+        } // role_guard dropped
+
+        if ballot_number_was_rejected {
+            self.send_reject_ballot_number(src, src_msg_id).await;
+            return;
+        }
+
+        if should_broadcast_accept {
+            let body = Body::Accept {
+                ballot_number,
+                value: self.state_machine.lock().unwrap().clone(),
+            };
+            self.node.clone().broadcast(body, None).await;
         }
     }
 
