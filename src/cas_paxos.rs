@@ -261,7 +261,10 @@ impl CASPaxos {
     }
 
     async fn promise(self: Arc<Self>, src: &str, src_msg_id: usize, ballot_number: usize) {
-        if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+        tracing::debug!("called promise() on ballot_number {ballot_number}");
+        *self.role.lock().unwrap() = Role::Acceptor;
+
+       if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
             self.clone()
                 .send_reject_ballot_number(src, src_msg_id)
                 .await;
