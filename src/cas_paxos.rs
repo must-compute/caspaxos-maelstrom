@@ -210,6 +210,7 @@ impl CASPaxos {
         src_msg_id: usize,
         ballot_number: usize,
     ) {
+        tracing::debug!("called handle_accepted_msg on ballot_number {ballot_number}");
         let mut ballot_number_was_rejected = false;
         let mut should_reply_to_client = false;
         let mut client = String::new();
@@ -217,7 +218,7 @@ impl CASPaxos {
         {
             let mut role_guard = self.role.lock().unwrap();
             match &*role_guard {
-                Role::Acceptor => (),
+                Role::Acceptor => tracing::debug!("RECEVED ACCEPT WHILE I WAS AN ACCEPTOR"),
                 Role::Proposer {
                     op,
                     last_client_confirmation,
@@ -226,8 +227,10 @@ impl CASPaxos {
                 } => {
                     // we only want to confirm msgs accepted during the current CASPaxos round.
                     if self.highest_known_ballot_number.load(Ordering::SeqCst) > ballot_number {
+                        tracing::debug!("recv accept: decided to reject ballot number");
                         ballot_number_was_rejected = true;
                     } else {
+                        tracing::debug!("ROLE GUARD IN ACCEPT 231: {:?}", *role_guard);
                         let last_client_confirmation = *last_client_confirmation;
                         let pending_body = pending_client_repsonse_body.clone();
                         client = op.src.clone();
@@ -283,6 +286,7 @@ impl CASPaxos {
         ballot_number: usize,
         value: KeyValueStore<usize, usize>,
     ) {
+        tracing::debug!("called handle_promise_msg() on ballot_number {ballot_number}");
         let mut ballot_number_was_rejected = false;
         let mut should_broadcast_accept = false;
         {
@@ -344,6 +348,7 @@ impl CASPaxos {
         ballot_number: usize,
         value: KeyValueStore<usize, usize>,
     ) {
+        tracing::debug!("called accept() on ballot_number {ballot_number}");
         let role = self.role.lock().unwrap().clone();
         match role {
             Role::Proposer { .. } => (),
